@@ -1,70 +1,55 @@
-use std::{env, fs};
+use std::{env, fs, path::PathBuf};
 
-use proc_macro::TokenStream;
-use codegen::{Scope, Trait, Type};
 use jsl::SerdeSchema;
+use proc_macro::TokenStream;
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::quote;
+use syn::{Ident, LitBool, LitInt, LitStr, parse_macro_input};
+
+pub(crate) fn crate_root() -> PathBuf {
+    let crate_root = env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR environment variable not present");
+    PathBuf::from(crate_root)
+}
 
 #[proc_macro]
 pub fn embed_typed_config(input: TokenStream) -> TokenStream {
+    // find, read & parse schema file
 
-    quote!(
-        
-    )
+    let schema_filename = if input.is_empty() {
+        crate_root().join("config.schema.json")
+    } else {
+        let location: LitStr = parse_macro_input!(input);
+        crate_root().join(location.value())
+    };
 
-}
-
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
-        panic!("usage: config-schema-gen [config-schema.json] > output-file.rs");
-    }
-
-    let schema_filename = args[1].clone();
     let schema_file = fs::read_to_string(schema_filename.clone())
-        .unwrap_or_else(|e| panic!("cannot read {:}: {:}", schema_filename, e));
-
+        .unwrap_or_else(|e| panic!("cannot read {:?}: {:}", schema_filename, e));
     let config_schema: SerdeSchema =
         serde_json::from_str(&schema_file).expect("cannot parse JSON shema");
 
-    let mut scope = Scope::new();
+    // generate the TypedConfig trait
 
-    let trt = scope.new_trait("TypedConfig").vis("pub");
+    let getters = gen_getters("".to_string(), config_schema);
 
-    trt.new_fn("get_bool")
-        .arg_self()
-        .arg("key", "&str")
-        .ret(Type::new("Option").generic("bool").clone());
-    trt.new_fn("get_int")
-        .arg_self()
-        .arg("key", "&str")
-        .ret(Type::new("Option").generic("i64").clone());
-    trt.new_fn("get_str")
-        .arg_self()
-        .arg("key", "&str")
-        .ret(Type::new("Option").generic("String").clone());
+    (quote! {
+        pub trait TypedConfig {
+            fn get_bool(self: &Self, key: &str) -> Option<bool>;
 
-    println!(
-        "// This file was generated with config-schama-gen from {:}",
-        schema_filename
-    );
+            fn get_int(self: &Self, key: &str) -> Option<i64>;
 
-    gen_getters(trt, "".to_string(), config_schema);
+            fn get_str(self: &Self, key: &str) -> Option<String>;
 
-    let out_dir = env::var_os("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join("hello.rs");
-    fs::write(
-        &dest_path,
-        scope.to_string()
-    ).unwrap();
-    println!("cargo:rerun-if-changed=build.rs");
+            #getters
+        }
+    }).into()
 }
 
-fn gen_getters(trt: &mut Trait, prefix: String, schema: SerdeSchema) {
+fn gen_getters(prefix: String, schema: SerdeSchema) -> TokenStream2 {
     let typ = schema.typ.unwrap_or_else(|| "string".to_string());
 
     if typ == "object" {
+        let mut props = Vec::new();
         for p in schema.props.expect("missing properties") {
             let prefix = if prefix == "" {
                 p.0
@@ -72,52 +57,53 @@ fn gen_getters(trt: &mut Trait, prefix: String, schema: SerdeSchema) {
                 format!("{:}.{:}", prefix, p.0)
             };
 
-            gen_getters(trt, prefix, p.1)
+            props.push(gen_getters(prefix, p.1));
         }
+        quote! { #(#props)* }
     } else {
         let name = prefix.clone().replace('.', "_").replace('-', "_");
-
-        let funct = trt
-            .new_fn(format!("{:}", name).as_str())
-            .arg_self();
+        let name = Ident::new(&name, Span::call_site());
 
         let default = schema.extra.get("default");
 
-        if typ == "string" {
+        let (ret_type, line) = if typ == "string" {
             if let Some(default) = default {
-                funct.ret("String").line(format!(
-                    "self.get_str(\"{:}\").unwrap_or_else(|| {:}.to_string())",
-                    prefix, default
-                ));
+                let default = LitStr::new(default.as_str().unwrap(), Span::call_site());
+                (
+                    quote! { String },
+                    quote! { self.get_str(#prefix).unwrap_or_else(| | #default.to_string()) },
+                )
             } else {
-                funct
-                    .ret(Type::new("Option").generic("String").clone())
-                    .line(format!("self.get_str(\"{:}\")", prefix));
+                (quote! { Option<String> }, quote! { self.get_str(#prefix) })
             }
         } else if typ == "boolean" {
             if let Some(default) = default {
-                funct.ret("bool").line(format!(
-                    "self.get_bool(\"{:}\").unwrap_or({:})",
-                    prefix, default
-                ));
+                let default = LitBool::new(default.as_bool().unwrap(), Span::call_site());
+                (
+                    quote! { bool },
+                    quote! { self.get_bool(#prefix).unwrap_or(#default) },
+                )
             } else {
-                funct
-                    .ret(Type::new("Option").generic("bool").clone())
-                    .line(format!("self.get_bool(\"{:}\")", prefix));
+                (quote! { Option<bool> }, quote! { self.get_bool(#prefix) })
             }
         } else if typ == "integer" {
             if let Some(default) = default {
-                funct.ret("i64").line(format!(
-                    "self.get_int(\"{:}\").unwrap_or({:})",
-                    prefix, default
-                ));
+                let default = LitInt::new(&default.to_string(), Span::call_site());
+                (
+                    quote! { i64 },
+                    quote! { self.get_int(#prefix).unwrap_or(#default) },
+                )
             } else {
-                funct
-                    .ret(Type::new("Option").generic("i64").clone())
-                    .line(format!("self.get_int(\"{:}\")", prefix));
+                (quote! { Option<i64> }, quote! { self.get_int(#prefix) })
             }
         } else {
-            funct.line(format!("// TODO: cannot generate getter for type {:}", typ).to_string());
+            (quote! { () }, quote! {})
+        };
+
+        quote! {
+            fn #name(&self) -> #ret_type {
+                #line
+            }
         }
     }
 }
