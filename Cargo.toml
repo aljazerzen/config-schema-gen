@@ -11,8 +11,8 @@ proc-macro = true
 
 [dependencies]
 proc-macro2 = "1"
-serde = "0.6.0"
-serde_json = "1.0.64"
+serde = "1"
+serde_json = "1"
 jsl = "0.3"
 syn = "1"
 quote = "1"

@@ -4,7 +4,7 @@ use jsl::SerdeSchema;
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{Ident, LitBool, LitInt, LitStr, parse_macro_input};
+use syn::{parse_macro_input, Ident, LitBool, LitInt, LitStr};
 
 pub(crate) fn crate_root() -> PathBuf {
     let crate_root = env::var("CARGO_MANIFEST_DIR")
@@ -42,7 +42,8 @@ pub fn embed_typed_config(input: TokenStream) -> TokenStream {
 
             #getters
         }
-    }).into()
+    })
+    .into()
 }
 
 fn gen_getters(prefix: String, schema: SerdeSchema) -> TokenStream2 {
@@ -51,7 +52,7 @@ fn gen_getters(prefix: String, schema: SerdeSchema) -> TokenStream2 {
     if typ == "object" {
         let mut props = Vec::new();
         for p in schema.props.expect("missing properties") {
-            let prefix = if prefix == "" {
+            let prefix = if prefix.is_empty() {
                 p.0
             } else {
                 format!("{:}.{:}", prefix, p.0)
@@ -61,7 +62,7 @@ fn gen_getters(prefix: String, schema: SerdeSchema) -> TokenStream2 {
         }
         quote! { #(#props)* }
     } else {
-        let name = prefix.clone().replace('.', "_").replace('-', "_");
+        let name = prefix.replace('.', "_").replace('-', "_");
         let name = Ident::new(&name, Span::call_site());
 
         let default = schema.extra.get("default");
